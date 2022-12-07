@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/djherbis/buffer"
+	"github.com/djherbis/nio"
 	"io"
 	"math/rand"
 	"net"
@@ -67,8 +69,8 @@ type tcpConn struct {
 	connKey       uint32
 	canWrite      *sync.Cond // Condition variable to implement TCP backpressure.
 	state         tcpConnState
-	sndPipeReader *io.PipeReader
-	sndPipeWriter *io.PipeWriter
+	sndPipeReader *nio.PipeReader
+	sndPipeWriter *nio.PipeWriter
 	closeOnce     sync.Once
 	closeErr      error
 }
@@ -87,7 +89,8 @@ func newTCPConn(pcb *C.struct_tcp_pcb, handler TCPConnHandler) (TCPConn, error) 
 	setTCPErrCallback(pcb)
 	setTCPPollCallback(pcb, C.u8_t(TCP_POLL_INTERVAL))
 
-	pipeReader, pipeWriter := io.Pipe()
+	buf := buffer.New(0xffff)
+	pipeReader, pipeWriter := nio.Pipe(buf)
 	conn := &tcpConn{
 		pcb:           pcb,
 		handler:       handler,
@@ -185,11 +188,10 @@ func (conn *tcpConn) Receive(data []byte) error {
 	if err := conn.receiveCheck(); err != nil {
 		return err
 	}
-	n, err := conn.sndPipeWriter.Write(data)
+	_, err := conn.sndPipeWriter.Write(data)
 	if err != nil {
 		return NewLWIPError(LWIP_ERR_CLSD)
 	}
-	C.tcp_recved(conn.pcb, C.u16_t(n))
 	return NewLWIPError(LWIP_ERR_OK)
 }
 
@@ -210,6 +212,11 @@ func (conn *tcpConn) Read(data []byte) (int, error) {
 	if err == io.ErrClosedPipe {
 		err = io.EOF
 	}
+
+	lwipMutex.Lock()
+	C.tcp_recved(conn.pcb, C.u16_t(n))
+	lwipMutex.Unlock()
+
 	return n, err
 }
 
